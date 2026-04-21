@@ -25,7 +25,7 @@ function savePortfolio() {
     localStorage.setItem('divy_portfolio', JSON.stringify(portfolio));
     localStorage.setItem('divy_nextId', String(nextId));
     localStorage.setItem('divy_updated', new Date().toISOString());
-  } catch(e) { console.warn('Could not save to localStorage:', e); }
+  } catch(e) { console.warn('Could not save:', e); }
 }
 
 function loadPortfolio() {
@@ -40,7 +40,7 @@ function loadPortfolio() {
       document.getElementById('last-updated').textContent =
         'Saved ' + d.toLocaleDateString() + ' ' + d.toLocaleTimeString([], {hour:'2-digit',minute:'2-digit'});
     }
-  } catch(e) { console.warn('Could not load from localStorage:', e); portfolio = []; }
+  } catch(e) { console.warn('Could not load:', e); portfolio = []; }
 }
 
 // ── Helpers ───────────────────────────────────────────
@@ -72,9 +72,82 @@ function showToast(msg, duration = 2800) {
   setTimeout(() => t.classList.remove('show'), duration);
 }
 
+// ── Finnhub API ───────────────────────────────────────
+
+const FINNHUB_KEY = 'd7junu1r01qnk4ocuts0d7junu1r01qnk4ocutsg';
+const FH_BASE = 'https://finnhub.io/api/v1';
+
+async function fhGet(path, params = {}) {
+  const p = new URLSearchParams({ ...params, token: FINNHUB_KEY });
+  const res = await fetch(`${FH_BASE}${path}?${p}`);
+  if (!res.ok) throw new Error(`Finnhub ${res.status}: ${path}`);
+  return res.json();
+}
+
+async function fetchFinnhubFull(ticker) {
+  const [quoteRes, profileRes, metricsRes] = await Promise.allSettled([
+    fhGet('/quote', { symbol: ticker }),
+    fhGet('/stock/profile2', { symbol: ticker }),
+    fhGet('/stock/metric', { symbol: ticker, metric: 'all' }),
+  ]);
+
+  const quote   = quoteRes.status   === 'fulfilled' ? quoteRes.value   : null;
+  const profile = profileRes.status === 'fulfilled' ? profileRes.value : null;
+  const metrics = metricsRes.status === 'fulfilled' ? metricsRes.value : null;
+
+  if (!quote || !quote.c || quote.c === 0) return null;
+
+  const currentPrice = quote.c;
+  const m = metrics?.metric || {};
+  const annualDiv = m['dividendPerShareAnnual'] || m['dividendPerShareTTM'] || 0;
+  const divYieldRaw = m['dividendYieldIndicatedAnnual'] || m['currentDividendYieldTTM'] || 0;
+  const name = profile?.name || ticker;
+
+  let freq = 'quarterly';
+  if (/monthly dividend/i.test(name)) freq = 'monthly';
+
+  return {
+    name,
+    currentPrice,
+    annualDiv,
+    freq,
+    exDay: 15,
+    payDay: 25,
+    divYield: divYieldRaw
+      ? divYieldRaw.toFixed(2)
+      : currentPrice > 0 ? (annualDiv / currentPrice * 100).toFixed(2) : '0.00',
+  };
+}
+
+// ── Refresh all prices ────────────────────────────────
+
+const SVG_REFRESH = '<svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><polyline points="23 4 23 10 17 10"/><polyline points="1 20 1 14 7 14"/><path d="M3.51 9a9 9 0 0 1 14.85-3.36L23 10M1 14l4.64 4.36A9 9 0 0 0 20.49 15"/></svg>';
+const SVG_SPIN = '<svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" style="animation:spin 0.7s linear infinite"><polyline points="23 4 23 10 17 10"/><polyline points="1 20 1 14 7 14"/><path d="M3.51 9a9 9 0 0 1 14.85-3.36L23 10M1 14l4.64 4.36A9 9 0 0 0 20.49 15"/></svg>';
+
+async function refreshPrices() {
+  if (portfolio.length === 0) { showToast('No stocks to refresh'); return; }
+  const btn = document.getElementById('refresh-prices-btn');
+  btn.disabled = true;
+  btn.innerHTML = SVG_SPIN + ' Refreshing...';
+
+  let updated = 0;
+  for (const s of portfolio) {
+    try {
+      const q = await fhGet('/quote', { symbol: s.ticker });
+      if (q.c && q.c > 0) { s.currentPrice = q.c; updated++; }
+      await new Promise(r => setTimeout(r, 200));
+    } catch(e) { console.warn('Refresh failed for', s.ticker, e); }
+  }
+  savePortfolio();
+  renderAll();
+  showToast(`Updated ${updated} stock${updated !== 1 ? 's' : ''}`);
+  btn.disabled = false;
+  btn.innerHTML = SVG_REFRESH + ' Refresh prices';
+}
+
 // ── Add / Remove / Edit ───────────────────────────────
 
-let pendingAdd = null; // holds fetched data while user reviews
+let pendingAdd = null;
 
 async function fetchAndPreview() {
   const ticker = document.getElementById('a-ticker').value.trim().toUpperCase();
@@ -86,52 +159,54 @@ async function fetchAndPreview() {
 
   const btn = document.getElementById('fetch-btn');
   btn.disabled = true;
-  btn.innerHTML = '<svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" style="animation:spin 0.7s linear infinite"><polyline points="23 4 23 10 17 10"/><polyline points="1 20 1 14 7 14"/><path d="M3.51 9a9 9 0 0 1 14.85-3.36L23 10M1 14l4.64 4.36A9 9 0 0 0 20.49 15"/></svg> Looking up...';
+  btn.innerHTML = SVG_SPIN + ' Looking up...';
   document.getElementById('add-err').style.display = 'none';
 
-  let currentPrice = 0, divPerShare = 0, name = ticker, freq = 'quarterly';
-  let exDay = 15, payDay = 25, divYield = 0;
-  let fetchFailed = false, note = '';
+  let data = null;
+  let fetchFailed = false;
 
   try {
-    const data = await fetchFinnhubFull(ticker);
+    data = await fetchFinnhubFull(ticker);
     if (!data) throw new Error('No data returned');
-
-    currentPrice = data.currentPrice;
-    name = data.name;
-    divPerShare = data.annualDiv;
-    divYield = parseFloat(data.divYield);
-    freq = data.freq;
-    exDay = data.exDay;
-    payDay = data.payDay;
-
-    note = divPerShare > 0
-      ? `Yield: ${data.divYield}%  ·  $${divPerShare.toFixed(2)}/sh annually  ·  ${freq}`
-      : `No dividend history found — enter one manually if applicable.`;
-
   } catch(e) {
     fetchFailed = true;
-    note = 'Could not fetch data — fill in the fields manually below.';
     console.warn('Finnhub fetch error:', e);
   }
 
   pendingAdd = {
-    ticker, shares, name, freq, exDay, payDay,
+    ticker,
+    shares,
     price: parseFloat(document.getElementById('a-price').value) || 0,
-    currentPrice, divPerShare, divYield,
+    name: data?.name || ticker,
+    currentPrice: data?.currentPrice || 0,
+    divPerShare: data?.annualDiv || 0,
+    freq: data?.freq || 'quarterly',
+    exDay: data?.exDay || 15,
+    payDay: data?.payDay || 25,
+    divYield: data?.divYield || '0.00',
   };
 
-  document.getElementById('preview-name').textContent = name;
+  document.getElementById('preview-name').textContent = pendingAdd.name;
   document.getElementById('preview-ticker').textContent = ticker;
-  document.getElementById('p-cprice').value = currentPrice ? currentPrice.toFixed(2) : '';
-  document.getElementById('p-div').value = divPerShare ? divPerShare.toFixed(4) : '';
-  document.getElementById('p-freq').value = freq;
-  document.getElementById('p-exday').value = exDay;
-  document.getElementById('p-payday').value = payDay;
-  document.getElementById('preview-note').textContent = note;
-  document.getElementById('preview-note').style.color = fetchFailed ? 'var(--amber)' : '';
-  document.getElementById('add-preview').style.display = 'block';
+  document.getElementById('p-cprice').value = pendingAdd.currentPrice ? pendingAdd.currentPrice.toFixed(2) : '';
+  document.getElementById('p-div').value = pendingAdd.divPerShare ? pendingAdd.divPerShare.toFixed(4) : '';
+  document.getElementById('p-freq').value = pendingAdd.freq;
+  document.getElementById('p-exday').value = pendingAdd.exDay;
+  document.getElementById('p-payday').value = pendingAdd.payDay;
 
+  const noteEl = document.getElementById('preview-note');
+  if (fetchFailed) {
+    noteEl.textContent = 'Could not reach Finnhub — fill in the fields manually.';
+    noteEl.style.color = 'var(--amber)';
+  } else if (pendingAdd.divPerShare > 0) {
+    noteEl.textContent = `Yield: ${pendingAdd.divYield}%  ·  $${pendingAdd.divPerShare.toFixed(2)}/sh annually  ·  ${pendingAdd.freq}`;
+    noteEl.style.color = '';
+  } else {
+    noteEl.textContent = `No dividend found for ${ticker} — enter one manually if applicable.`;
+    noteEl.style.color = 'var(--amber)';
+  }
+
+  document.getElementById('add-preview').style.display = 'block';
   btn.disabled = false;
   btn.innerHTML = '<svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><circle cx="11" cy="11" r="8"/><line x1="21" y1="21" x2="16.65" y2="16.65"/></svg> Look up ticker';
 }
@@ -211,86 +286,6 @@ function cancelEdit() {
   renderHoldings();
 }
 
-// ── Finnhub API ───────────────────────────────────────
-
-const FINNHUB_KEY = 'd7junu1r01qnk4ocuts0d7junu1r01qnk4ocutsg';
-const FH_BASE = 'https://finnhub.io/api/v1';
-
-async function fhGet(path, params = {}) {
-  const p = new URLSearchParams({ ...params, token: FINNHUB_KEY });
-  const res = await fetch(`${FH_BASE}${path}?${p}`);
-  if (!res.ok) throw new Error(`Finnhub ${res.status}: ${path}`);
-  return res.json();
-}
-
-// Fetch everything needed to add a stock: quote + profile + basic metrics
-async function fetchFinnhubFull(ticker) {
-  const [quoteRes, profileRes, metricsRes] = await Promise.allSettled([
-    fhGet('/quote', { symbol: ticker }),
-    fhGet('/stock/profile2', { symbol: ticker }),
-    fhGet('/stock/metric', { symbol: ticker, metric: 'all' }),
-  ]);
-
-  const quote   = quoteRes.status   === 'fulfilled' ? quoteRes.value   : null;
-  const profile = profileRes.status === 'fulfilled' ? profileRes.value : null;
-  const metrics = metricsRes.status === 'fulfilled' ? metricsRes.value : null;
-
-  console.log('quote:', quote);
-  console.log('metrics:', metrics);
-
-  if (!quote || !quote.c || quote.c === 0) return null;
-
-  const currentPrice = quote.c;
-  const m = metrics?.metric || {};
-  const annualDiv = m['dividendPerShareAnnual'] || m['dividendPerShareTTM'] || 0;
-  const divYieldRaw = m['dividendYieldIndicatedAnnual'] || 0;
-
-  console.log('annualDiv:', annualDiv, 'divYield:', divYieldRaw);
-
-  const name = profile?.name || ticker;
-  let freq = 'quarterly';
-  if (/monthly dividend/i.test(name)) freq = 'monthly';
-
-  return {
-    name,
-    currentPrice,
-    annualDiv,
-    freq,
-    exDay: 15,
-    payDay: 25,
-    divYield: divYieldRaw
-      ? divYieldRaw.toFixed(2)
-      : currentPrice > 0
-        ? (annualDiv / currentPrice * 100).toFixed(2)
-        : '0.00',
-  };
-}
-
-// ── Refresh all prices ────────────────────────────────
-
-async function refreshPrices() {
-  if (portfolio.length === 0) { showToast('No stocks to refresh'); return; }
-  const btn = document.getElementById('refresh-prices-btn');
-  const ICON_SPIN = '<svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" style="animation:spin 0.7s linear infinite"><polyline points="23 4 23 10 17 10"/><polyline points="1 20 1 14 7 14"/><path d="M3.51 9a9 9 0 0 1 14.85-3.36L23 10M1 14l4.64 4.36A9 9 0 0 0 20.49 15"/></svg>';
-  const ICON = '<svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><polyline points="23 4 23 10 17 10"/><polyline points="1 20 1 14 7 14"/><path d="M3.51 9a9 9 0 0 1 14.85-3.36L23 10M1 14l4.64 4.36A9 9 0 0 0 20.49 15"/></svg>';
-  btn.disabled = true;
-  btn.innerHTML = ICON_SPIN + ' Refreshing...';
-
-  let updated = 0;
-  for (const s of portfolio) {
-    try {
-      const q = await fhGet('/quote', { symbol: s.ticker });
-      if (q.c && q.c > 0) { s.currentPrice = q.c; updated++; }
-      await new Promise(r => setTimeout(r, 200)); // respect 60 req/min free tier
-    } catch(e) { console.warn('Refresh failed for', s.ticker, e); }
-  }
-  savePortfolio();
-  renderAll();
-  showToast(`Updated ${updated} stock${updated !== 1 ? 's' : ''}`);
-  btn.disabled = false;
-  btn.innerHTML = ICON + ' Refresh prices';
-}
-
 // ── Dividend date logic ───────────────────────────────
 
 function getDivDates(s, year, month) {
@@ -305,10 +300,8 @@ function getDivDates(s, year, month) {
   if (ok) {
     const n = FREQ_N[freq] || 4;
     const maxDay = new Date(year, month + 1, 0).getDate();
-    const exD = Math.min(s.exDay || 15, maxDay);
-    const payD = Math.min(s.payDay || 25, maxDay);
-    evs.push({ type: 'ex', day: exD, ticker: s.ticker });
-    evs.push({ type: 'pay', day: payD, ticker: s.ticker, amount: s.divPerShare * s.shares / n });
+    evs.push({ type: 'ex',  day: Math.min(s.exDay  || 15, maxDay), ticker: s.ticker });
+    evs.push({ type: 'pay', day: Math.min(s.payDay || 25, maxDay), ticker: s.ticker, amount: s.divPerShare * s.shares / n });
   }
   return evs;
 }
@@ -338,28 +331,12 @@ function renderPortfolio() {
   const avgY = totV > 0 ? totA / totV * 100 : 0;
 
   document.getElementById('port-metrics').innerHTML = `
-    <div class="metric">
-      <div class="metric-label">Holdings</div>
-      <div class="metric-value">${portfolio.length}</div>
-    </div>
-    <div class="metric">
-      <div class="metric-label">Portfolio value</div>
-      <div class="metric-value">${f$(totV)}</div>
-    </div>
-    <div class="metric">
-      <div class="metric-label">Annual dividends</div>
-      <div class="metric-value green">${f$(totA)}</div>
-    </div>
-    <div class="metric">
-      <div class="metric-label">Avg yield</div>
-      <div class="metric-value green">${fp(avgY)}</div>
-    </div>
-    <div class="metric">
-      <div class="metric-label">Gain / loss</div>
-      <div class="metric-value ${totGL >= 0 ? 'green' : ''}" style="${totGL < 0 ? 'color:var(--red)' : ''}">${totGL >= 0 ? '+' : ''}${f$(totGL)}</div>
-    </div>
+    <div class="metric"><div class="metric-label">Holdings</div><div class="metric-value">${portfolio.length}</div></div>
+    <div class="metric"><div class="metric-label">Portfolio value</div><div class="metric-value">${f$(totV)}</div></div>
+    <div class="metric"><div class="metric-label">Annual dividends</div><div class="metric-value green">${f$(totA)}</div></div>
+    <div class="metric"><div class="metric-label">Avg yield</div><div class="metric-value green">${fp(avgY)}</div></div>
+    <div class="metric"><div class="metric-label">Gain / loss</div><div class="metric-value ${totGL >= 0 ? 'green' : ''}" style="${totGL < 0 ? 'color:var(--red)' : ''}">${totGL >= 0 ? '+' : ''}${f$(totGL)}</div></div>
   `;
-
   document.getElementById('header-annual').textContent = portfolio.length ? f$(totA) + '/yr' : '';
   document.getElementById('port-yield').textContent = 'Avg yield: ' + fp(avgY);
 }
@@ -397,12 +374,10 @@ function renderHoldings() {
         <td><input id="e-exday-${s.id}" type="number" value="${s.exDay}" min="1" max="28" style="width:55px"></td>
         <td><input id="e-payday-${s.id}" type="number" value="${s.payDay}" min="1" max="31" style="width:55px"></td>
         <td colspan="3" style="color:var(--text-muted);font-size:12px">${f$(adiv(s))}/yr &nbsp; ${fp(yld(s))} yield</td>
-        <td>
-          <div class="actions-cell">
-            <button class="btn btn-sm btn-primary" onclick="saveEdit(${s.id})">Save</button>
-            <button class="btn btn-sm btn-ghost" onclick="cancelEdit()">Cancel</button>
-          </div>
-        </td>
+        <td><div class="actions-cell">
+          <button class="btn btn-sm btn-primary" onclick="saveEdit(${s.id})">Save</button>
+          <button class="btn btn-sm btn-ghost" onclick="cancelEdit()">Cancel</button>
+        </div></td>
       </tr>`;
     }
 
@@ -423,12 +398,10 @@ function renderHoldings() {
       <td><span class="total-cell">${f$(adiv(s))}</span></td>
       <td><span class="yield-cell">${fp(yld(s))}</span></td>
       <td>${glStr}</td>
-      <td>
-        <div class="actions-cell">
-          <button class="btn btn-sm btn-edit" onclick="startEdit(${s.id})">Edit</button>
-          <button class="btn btn-sm btn-danger" onclick="removeStock(${s.id})">✕</button>
-        </div>
-      </td>
+      <td><div class="actions-cell">
+        <button class="btn btn-sm btn-edit" onclick="startEdit(${s.id})">Edit</button>
+        <button class="btn btn-sm btn-danger" onclick="removeStock(${s.id})">✕</button>
+      </div></td>
     </tr>`;
   }).join('');
 }
@@ -437,13 +410,10 @@ function renderHoldings() {
 
 function renderCalendar() {
   document.getElementById('cal-title').textContent = MONTHS[calMonth] + ' ' + calYear;
-
-  const hds = document.getElementById('cal-hds');
-  hds.innerHTML = DAYS.map(d => `<div class="cal-day-header">${d}</div>`).join('');
+  document.getElementById('cal-hds').innerHTML = DAYS.map(d => `<div class="cal-day-header">${d}</div>`).join('');
 
   const firstDay = new Date(calYear, calMonth, 1).getDay();
   const dim = new Date(calYear, calMonth + 1, 0).getDate();
-
   const evMap = {};
   portfolio.forEach(s => getDivDates(s, calYear, calMonth).forEach(ev => {
     if (!evMap[ev.day]) evMap[ev.day] = [];
@@ -482,7 +452,6 @@ function renderIncome() {
     <div class="metric"><div class="metric-label">Annual total</div><div class="metric-value green">${f$(totA)}</div><div class="metric-sub">per year</div></div>
   `;
 
-  // Monthly chart
   const mi = Array(12).fill(0);
   portfolio.forEach(s => {
     for (let m = 0; m < 12; m++) {
@@ -492,16 +461,13 @@ function renderIncome() {
   const mx = Math.max(...mi, 1);
   document.getElementById('inc-chart').innerHTML = mi.map((v, i) => {
     const h = Math.max(3, Math.round(v / mx * 110));
-    const isCurrent = i === today.getMonth();
     return `<div class="bar-col">
       <div class="bar-val">${v > 0 ? '$' + Math.round(v) : ''}</div>
-      <div class="bar-body${isCurrent ? ' current-month' : ''}" style="height:${h}px"></div>
+      <div class="bar-body${i === today.getMonth() ? ' current-month' : ''}" style="height:${h}px"></div>
     </div>`;
   }).join('');
-  document.getElementById('inc-labels').innerHTML = MS.map(m =>
-    `<div class="month-label">${m}</div>`).join('');
+  document.getElementById('inc-labels').innerHTML = MS.map(m => `<div class="month-label">${m}</div>`).join('');
 
-  // Upcoming payments
   const upcoming = getNextPayments(90);
   const ul = document.getElementById('upcoming-list');
   const ue = document.getElementById('upcoming-empty');
@@ -529,9 +495,7 @@ function renderIncome() {
     }).join('');
   }
 
-  // By holding chart
-  const byHolding = portfolio.map(s => ({ ticker: s.ticker, amount: adiv(s) }))
-    .sort((a, b) => b.amount - a.amount);
+  const byHolding = portfolio.map(s => ({ ticker: s.ticker, amount: adiv(s) })).sort((a, b) => b.amount - a.amount);
   const maxH = byHolding.length ? byHolding[0].amount : 1;
   document.getElementById('by-holding-chart').innerHTML = byHolding.length
     ? byHolding.map((h, i) => `
@@ -638,7 +602,7 @@ function renderAll() {
   if (document.getElementById('tab-timer').classList.contains('active')) renderTimer();
 }
 
-// ── Spin animation for refresh button ─────────────────
+// ── Spin animation ────────────────────────────────────
 const style = document.createElement('style');
 style.textContent = '@keyframes spin { to { transform: rotate(360deg); } }';
 document.head.appendChild(style);
