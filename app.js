@@ -235,16 +235,18 @@ async function fetchFinnhubFull(ticker) {
   const profile = profileRes.status === 'fulfilled' ? profileRes.value : null;
   const metrics = metricsRes.status === 'fulfilled' ? metricsRes.value : null;
 
+  console.log('quote:', quote);
+  console.log('metrics:', metrics);
+
   if (!quote || !quote.c || quote.c === 0) return null;
 
   const currentPrice = quote.c;
-
-  // Dividend data from basic metrics (available on free tier)
   const m = metrics?.metric || {};
   const annualDiv = m['dividendPerShareAnnual'] || m['dividendPerShareTTM'] || 0;
   const divYieldRaw = m['dividendYieldIndicatedAnnual'] || 0;
 
-  // Frequency — default quarterly, detect monthly from name
+  console.log('annualDiv:', annualDiv, 'divYield:', divYieldRaw);
+
   const name = profile?.name || ticker;
   let freq = 'quarterly';
   if (/monthly dividend/i.test(name)) freq = 'monthly';
@@ -256,7 +258,11 @@ async function fetchFinnhubFull(ticker) {
     freq,
     exDay: 15,
     payDay: 25,
-    divYield: divYieldRaw ? divYieldRaw.toFixed(2) : currentPrice > 0 ? (annualDiv / currentPrice * 100).toFixed(2) : '0.00',
+    divYield: divYieldRaw
+      ? divYieldRaw.toFixed(2)
+      : currentPrice > 0
+        ? (annualDiv / currentPrice * 100).toFixed(2)
+        : '0.00',
   };
 }
 
