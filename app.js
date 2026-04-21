@@ -223,53 +223,40 @@ async function fhGet(path, params = {}) {
   return res.json();
 }
 
-// Fetch everything needed to add a stock: quote + profile + dividend history
+// Fetch everything needed to add a stock: quote + profile + basic metrics
 async function fetchFinnhubFull(ticker) {
-  const to = new Date().toISOString().slice(0, 10);
-  const from = new Date(Date.now() - 2 * 365 * 86400000).toISOString().slice(0, 10);
-
-  const [quoteRes, profileRes, divRes] = await Promise.allSettled([
+  const [quoteRes, profileRes, metricsRes] = await Promise.allSettled([
     fhGet('/quote', { symbol: ticker }),
     fhGet('/stock/profile2', { symbol: ticker }),
-    fhGet('/stock/dividend', { symbol: ticker, from, to }),
+    fhGet('/stock/metric', { symbol: ticker, metric: 'all' }),
   ]);
 
   const quote   = quoteRes.status   === 'fulfilled' ? quoteRes.value   : null;
   const profile = profileRes.status === 'fulfilled' ? profileRes.value : null;
-  const divs    = divRes.status     === 'fulfilled' ? (Array.isArray(divRes.value) ? divRes.value : []) : [];
+  const metrics = metricsRes.status === 'fulfilled' ? metricsRes.value : null;
 
   if (!quote || !quote.c || quote.c === 0) return null;
 
-  // Sort dividends newest-first
-  divs.sort((a, b) => new Date(b.exDate || b.date) - new Date(a.exDate || a.date));
-  const latest = divs[0] || null;
-
-  // Infer frequency from how many dividends in the past 12 months
-  const oneYearAgo = Date.now() - 365 * 86400000;
-  const recent = divs.filter(d => new Date(d.exDate || d.date) > oneYearAgo);
-  let freq = 'quarterly';
-  if (recent.length >= 10) freq = 'monthly';
-  else if (recent.length <= 1) freq = 'annual';
-  else if (recent.length === 2) freq = 'semiannual';
-
-  const freqN = FREQ_N[freq] || 4;
-  const divAmount = latest?.amount || 0;
-  const annualDiv = divAmount * freqN;
-
-  let exDay = 15, payDay = 25;
-  if (latest?.exDate) exDay = new Date(latest.exDate).getDate();
-  if (latest?.payDate) payDay = new Date(latest.payDate).getDate();
-
   const currentPrice = quote.c;
 
+  // Dividend data from basic metrics (available on free tier)
+  const m = metrics?.metric || {};
+  const annualDiv = m['dividendPerShareAnnual'] || m['dividendPerShareTTM'] || 0;
+  const divYieldRaw = m['dividendYieldIndicatedAnnual'] || 0;
+
+  // Frequency — default quarterly, detect monthly from name
+  const name = profile?.name || ticker;
+  let freq = 'quarterly';
+  if (/monthly dividend/i.test(name)) freq = 'monthly';
+
   return {
-    name: profile?.name || ticker,
+    name,
     currentPrice,
     annualDiv,
     freq,
-    exDay,
-    payDay,
-    divYield: currentPrice > 0 ? (annualDiv / currentPrice * 100).toFixed(2) : '0.00',
+    exDay: 15,
+    payDay: 25,
+    divYield: divYieldRaw ? divYieldRaw.toFixed(2) : currentPrice > 0 ? (annualDiv / currentPrice * 100).toFixed(2) : '0.00',
   };
 }
 
