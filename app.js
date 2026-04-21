@@ -89,60 +89,67 @@ async function fetchAndPreview() {
   btn.innerHTML = '<svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" style="animation:spin 0.7s linear infinite"><polyline points="23 4 23 10 17 10"/><polyline points="1 20 1 14 7 14"/><path d="M3.51 9a9 9 0 0 1 14.85-3.36L23 10M1 14l4.64 4.36A9 9 0 0 0 20.49 15"/></svg> Looking up...';
   document.getElementById('add-err').style.display = 'none';
 
+  let quote = null;
+  let fetchFailed = false;
+
   try {
-    const quote = await fetchYahooQuote(ticker);
-    if (!quote) throw new Error('No data returned');
-
-    // Infer frequency from dividends per year
-    const divRate = quote.trailingAnnualDividendRate || 0;
-    const divYield = quote.trailingAnnualDividendYield || 0;
-    let freq = 'quarterly';
-    // Yahoo doesn't give frequency directly — infer from name hints or default quarterly
-    const name = quote.longName || quote.shortName || ticker;
-    if (/monthly/i.test(name) || /realty income|main street|stag |agree |prologis/i.test(name)) freq = 'monthly';
-
-    // Estimate ex-div and pay days from last known dates if available
-    let exDay = 15, payDay = 25;
-    if (quote.exDividendDate) {
-      const ex = new Date(quote.exDividendDate * 1000);
-      exDay = ex.getDate();
-      payDay = Math.min(exDay + 10, 28);
-    }
-
-    pendingAdd = {
-      ticker,
-      shares,
-      price: parseFloat(document.getElementById('a-price').value) || 0,
-      name,
-      currentPrice: quote.regularMarketPrice || 0,
-      divPerShare: divRate,
-      freq,
-      divYield: (divYield * 100).toFixed(2),
-      exDay,
-      payDay,
-    };
-
-    // Populate preview fields
-    document.getElementById('preview-name').textContent = name;
-    document.getElementById('preview-ticker').textContent = ticker;
-    document.getElementById('p-cprice').value = pendingAdd.currentPrice.toFixed(2);
-    document.getElementById('p-div').value = pendingAdd.divPerShare.toFixed(4);
-    document.getElementById('p-freq').value = pendingAdd.freq;
-    document.getElementById('p-exday').value = pendingAdd.exDay;
-    document.getElementById('p-payday').value = pendingAdd.payDay;
-
-    // Update note with yield info
-    const yieldStr = divRate > 0
-      ? `Yield: ${pendingAdd.divYield}%  ·  $${divRate.toFixed(2)}/sh annually  ·  Price: $${pendingAdd.currentPrice.toFixed(2)}`
-      : `No dividend found for ${ticker}. You can enter one manually below.`;
-    document.getElementById('preview-note').textContent = yieldStr;
-
-    document.getElementById('add-preview').style.display = 'block';
-
+    quote = await fetchYahooQuote(ticker);
   } catch(e) {
-    showFormError('Could not fetch data for ' + ticker + '. Check the ticker and try again.');
-    console.warn('Fetch error:', e);
+    console.warn('All proxies failed:', e);
+    fetchFailed = true;
   }
+
+  // Build pending data — use fetched values if available, blanks if not
+  const divRate = quote?.trailingAnnualDividendRate || 0;
+  const divYield = quote?.trailingAnnualDividendYield || 0;
+  const name = quote?.longName || quote?.shortName || ticker;
+
+  let freq = 'quarterly';
+  if (quote && /monthly dividend/i.test(name)) freq = 'monthly';
+
+  let exDay = 15, payDay = 25;
+  if (quote?.exDividendDate) {
+    const ex = new Date(quote.exDividendDate * 1000);
+    exDay = ex.getDate();
+    payDay = Math.min(exDay + 10, 28);
+  }
+
+  pendingAdd = {
+    ticker,
+    shares,
+    price: parseFloat(document.getElementById('a-price').value) || 0,
+    name,
+    currentPrice: quote?.regularMarketPrice || 0,
+    divPerShare: divRate,
+    freq,
+    divYield: (divYield * 100).toFixed(2),
+    exDay,
+    payDay,
+  };
+
+  // Populate preview fields
+  document.getElementById('preview-name').textContent = name;
+  document.getElementById('preview-ticker').textContent = ticker;
+  document.getElementById('p-cprice').value = pendingAdd.currentPrice ? pendingAdd.currentPrice.toFixed(2) : '';
+  document.getElementById('p-div').value = pendingAdd.divPerShare ? pendingAdd.divPerShare.toFixed(4) : '';
+  document.getElementById('p-freq').value = pendingAdd.freq;
+  document.getElementById('p-exday').value = pendingAdd.exDay;
+  document.getElementById('p-payday').value = pendingAdd.payDay;
+
+  // Status note
+  let note;
+  if (fetchFailed || !quote) {
+    note = 'Could not reach Yahoo Finance — please fill in the fields manually below.';
+    document.getElementById('preview-note').style.color = 'var(--amber)';
+  } else if (divRate > 0) {
+    note = `Yield: ${pendingAdd.divYield}%  ·  $${divRate.toFixed(2)}/sh annually  ·  Price: $${pendingAdd.currentPrice.toFixed(2)}`;
+    document.getElementById('preview-note').style.color = '';
+  } else {
+    note = `No dividend found for ${ticker} — enter one manually if applicable.`;
+    document.getElementById('preview-note').style.color = 'var(--amber)';
+  }
+  document.getElementById('preview-note').textContent = note;
+  document.getElementById('add-preview').style.display = 'block';
 
   btn.disabled = false;
   btn.innerHTML = '<svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><circle cx="11" cy="11" r="8"/><line x1="21" y1="21" x2="16.65" y2="16.65"/></svg> Look up ticker';
@@ -224,23 +231,60 @@ function cancelEdit() {
 }
 
 // ── Yahoo Finance API ─────────────────────────────────
+// Multiple proxies tried in order; 8s timeout per attempt
 
-const PROXY = 'https://api.allorigins.win/get?url=';
+const PROXIES = [
+  url => `https://api.allorigins.win/get?url=${encodeURIComponent(url)}`,
+  url => `https://corsproxy.io/?${encodeURIComponent(url)}`,
+  url => `https://api.codetabs.com/v1/proxy?quest=${encodeURIComponent(url)}`,
+];
+
+async function fetchWithTimeout(url, ms = 8000) {
+  const controller = new AbortController();
+  const id = setTimeout(() => controller.abort(), ms);
+  try {
+    const res = await fetch(url, { signal: controller.signal });
+    clearTimeout(id);
+    return res;
+  } catch(e) {
+    clearTimeout(id);
+    throw e;
+  }
+}
+
+async function fetchYahooRaw(yahooUrl) {
+  for (const makeProxy of PROXIES) {
+    try {
+      const proxyUrl = makeProxy(yahooUrl);
+      const res = await fetchWithTimeout(proxyUrl, 8000);
+      if (!res.ok) continue;
+      const text = await res.text();
+      // allorigins wraps in {contents:...}, others return raw JSON
+      let json;
+      try {
+        const outer = JSON.parse(text);
+        json = typeof outer.contents === 'string' ? JSON.parse(outer.contents) : outer;
+      } catch {
+        json = JSON.parse(text);
+      }
+      return json;
+    } catch(e) {
+      console.warn('Proxy failed, trying next...', e.message);
+    }
+  }
+  return null;
+}
 
 async function fetchYahooQuote(ticker) {
-  const url = `https://query1.finance.yahoo.com/v7/finance/quote?symbols=${ticker}`;
-  const res = await fetch(PROXY + encodeURIComponent(url));
-  const outer = await res.json();
-  const data = JSON.parse(outer.contents);
+  const url = `https://query1.finance.yahoo.com/v7/finance/quote?symbols=${ticker}&fields=regularMarketPrice,trailingAnnualDividendRate,trailingAnnualDividendYield,longName,shortName,exDividendDate`;
+  const data = await fetchYahooRaw(url);
   const quotes = data?.quoteResponse?.result || [];
   return quotes[0] || null;
 }
 
 async function fetchYahooQuotes(tickers) {
-  const url = `https://query1.finance.yahoo.com/v7/finance/quote?symbols=${tickers.join(',')}`;
-  const res = await fetch(PROXY + encodeURIComponent(url));
-  const outer = await res.json();
-  const data = JSON.parse(outer.contents);
+  const url = `https://query1.finance.yahoo.com/v7/finance/quote?symbols=${tickers.join(',')}&fields=regularMarketPrice,trailingAnnualDividendRate,trailingAnnualDividendYield,longName,shortName`;
+  const data = await fetchYahooRaw(url);
   return data?.quoteResponse?.result || [];
 }
 
