@@ -74,35 +74,115 @@ function showToast(msg, duration = 2800) {
 
 // ── Add / Remove / Edit ───────────────────────────────
 
-function addStock() {
+let pendingAdd = null; // holds fetched data while user reviews
+
+async function fetchAndPreview() {
   const ticker = document.getElementById('a-ticker').value.trim().toUpperCase();
   const shares = parseFloat(document.getElementById('a-shares').value);
-  const price = parseFloat(document.getElementById('a-price').value) || 0;
-  const cprice = parseFloat(document.getElementById('a-cprice').value) || price;
-  const div = parseFloat(document.getElementById('a-div').value) || 0;
-  const freq = document.getElementById('a-freq').value;
-  const exDay = parseInt(document.getElementById('a-exday').value) || 15;
-  const payDay = parseInt(document.getElementById('a-payday').value) || 25;
-  const err = document.getElementById('add-err');
 
   if (!ticker) { showFormError('Please enter a ticker symbol.'); return; }
-  if (!shares || isNaN(shares) || shares <= 0) { showFormError('Please enter a valid number of shares.'); return; }
+  if (!shares || isNaN(shares) || shares <= 0) { showFormError('Please enter a number of shares.'); return; }
   if (portfolio.find(s => s.ticker === ticker)) { showFormError(ticker + ' is already in your portfolio.'); return; }
 
-  err.style.display = 'none';
-  portfolio.push({ id: nextId++, ticker, name: ticker, shares, price, currentPrice: cprice || price, divPerShare: div, freq, exDay, payDay });
+  const btn = document.getElementById('fetch-btn');
+  btn.disabled = true;
+  btn.innerHTML = '<svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" style="animation:spin 0.7s linear infinite"><polyline points="23 4 23 10 17 10"/><polyline points="1 20 1 14 7 14"/><path d="M3.51 9a9 9 0 0 1 14.85-3.36L23 10M1 14l4.64 4.36A9 9 0 0 0 20.49 15"/></svg> Looking up...';
+  document.getElementById('add-err').style.display = 'none';
+
+  try {
+    const quote = await fetchYahooQuote(ticker);
+    if (!quote) throw new Error('No data returned');
+
+    // Infer frequency from dividends per year
+    const divRate = quote.trailingAnnualDividendRate || 0;
+    const divYield = quote.trailingAnnualDividendYield || 0;
+    let freq = 'quarterly';
+    // Yahoo doesn't give frequency directly — infer from name hints or default quarterly
+    const name = quote.longName || quote.shortName || ticker;
+    if (/monthly/i.test(name) || /realty income|main street|stag |agree |prologis/i.test(name)) freq = 'monthly';
+
+    // Estimate ex-div and pay days from last known dates if available
+    let exDay = 15, payDay = 25;
+    if (quote.exDividendDate) {
+      const ex = new Date(quote.exDividendDate * 1000);
+      exDay = ex.getDate();
+      payDay = Math.min(exDay + 10, 28);
+    }
+
+    pendingAdd = {
+      ticker,
+      shares,
+      price: parseFloat(document.getElementById('a-price').value) || 0,
+      name,
+      currentPrice: quote.regularMarketPrice || 0,
+      divPerShare: divRate,
+      freq,
+      divYield: (divYield * 100).toFixed(2),
+      exDay,
+      payDay,
+    };
+
+    // Populate preview fields
+    document.getElementById('preview-name').textContent = name;
+    document.getElementById('preview-ticker').textContent = ticker;
+    document.getElementById('p-cprice').value = pendingAdd.currentPrice.toFixed(2);
+    document.getElementById('p-div').value = pendingAdd.divPerShare.toFixed(4);
+    document.getElementById('p-freq').value = pendingAdd.freq;
+    document.getElementById('p-exday').value = pendingAdd.exDay;
+    document.getElementById('p-payday').value = pendingAdd.payDay;
+
+    // Update note with yield info
+    const yieldStr = divRate > 0
+      ? `Yield: ${pendingAdd.divYield}%  ·  $${divRate.toFixed(2)}/sh annually  ·  Price: $${pendingAdd.currentPrice.toFixed(2)}`
+      : `No dividend found for ${ticker}. You can enter one manually below.`;
+    document.getElementById('preview-note').textContent = yieldStr;
+
+    document.getElementById('add-preview').style.display = 'block';
+
+  } catch(e) {
+    showFormError('Could not fetch data for ' + ticker + '. Check the ticker and try again.');
+    console.warn('Fetch error:', e);
+  }
+
+  btn.disabled = false;
+  btn.innerHTML = '<svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><circle cx="11" cy="11" r="8"/><line x1="21" y1="21" x2="16.65" y2="16.65"/></svg> Look up ticker';
+}
+
+function confirmAdd() {
+  if (!pendingAdd) return;
+  const s = {
+    id: nextId++,
+    ticker: pendingAdd.ticker,
+    name: pendingAdd.name,
+    shares: pendingAdd.shares,
+    price: pendingAdd.price,
+    currentPrice: parseFloat(document.getElementById('p-cprice').value) || pendingAdd.currentPrice,
+    divPerShare: parseFloat(document.getElementById('p-div').value) || 0,
+    freq: document.getElementById('p-freq').value,
+    exDay: parseInt(document.getElementById('p-exday').value) || 15,
+    payDay: parseInt(document.getElementById('p-payday').value) || 25,
+  };
+  portfolio.push(s);
   savePortfolio();
-  ['a-ticker','a-shares','a-price','a-cprice','a-div','a-exday','a-payday'].forEach(id => document.getElementById(id).value = '');
-  document.getElementById('a-freq').value = 'quarterly';
+  cancelPreview();
   renderAll();
-  showToast(ticker + ' added to portfolio');
+  showToast(s.ticker + ' added — ' + s.shares + ' shares');
+}
+
+function cancelPreview() {
+  pendingAdd = null;
+  document.getElementById('add-preview').style.display = 'none';
+  document.getElementById('a-ticker').value = '';
+  document.getElementById('a-shares').value = '';
+  document.getElementById('a-price').value = '';
+  document.getElementById('add-err').style.display = 'none';
 }
 
 function showFormError(msg) {
   const err = document.getElementById('add-err');
   err.textContent = msg;
   err.style.display = 'block';
-  setTimeout(() => { err.style.display = 'none'; }, 4000);
+  setTimeout(() => { err.style.display = 'none'; }, 5000);
 }
 
 function removeStock(id) {
@@ -143,6 +223,27 @@ function cancelEdit() {
   renderHoldings();
 }
 
+// ── Yahoo Finance API ─────────────────────────────────
+
+const PROXY = 'https://api.allorigins.win/get?url=';
+
+async function fetchYahooQuote(ticker) {
+  const url = `https://query1.finance.yahoo.com/v7/finance/quote?symbols=${ticker}`;
+  const res = await fetch(PROXY + encodeURIComponent(url));
+  const outer = await res.json();
+  const data = JSON.parse(outer.contents);
+  const quotes = data?.quoteResponse?.result || [];
+  return quotes[0] || null;
+}
+
+async function fetchYahooQuotes(tickers) {
+  const url = `https://query1.finance.yahoo.com/v7/finance/quote?symbols=${tickers.join(',')}`;
+  const res = await fetch(PROXY + encodeURIComponent(url));
+  const outer = await res.json();
+  const data = JSON.parse(outer.contents);
+  return data?.quoteResponse?.result || [];
+}
+
 // ── Price refresh (Yahoo Finance) ─────────────────────
 
 async function refreshPrices() {
@@ -151,31 +252,20 @@ async function refreshPrices() {
   btn.disabled = true;
   btn.innerHTML = '<svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" style="animation:spin 0.7s linear infinite"><polyline points="23 4 23 10 17 10"/><polyline points="1 20 1 14 7 14"/><path d="M3.51 9a9 9 0 0 1 14.85-3.36L23 10M1 14l4.64 4.36A9 9 0 0 0 20.49 15"/></svg> Refreshing...';
 
-  const tickers = portfolio.map(s => s.ticker).join(',');
-  // Use Yahoo Finance v8 (no key needed, CORS-friendly via allorigins proxy)
-  const url = `https://query1.finance.yahoo.com/v7/finance/quote?symbols=${tickers}`;
-  const proxy = `https://api.allorigins.win/get?url=${encodeURIComponent(url)}`;
-
   try {
-    const res = await fetch(proxy);
-    const outer = await res.json();
-    const data = JSON.parse(outer.contents);
-    const quotes = data?.quoteResponse?.result || [];
+    const quotes = await fetchYahooQuotes(portfolio.map(s => s.ticker));
     let updated = 0;
     quotes.forEach(q => {
       const s = portfolio.find(p => p.ticker === q.symbol);
       if (s && q.regularMarketPrice) {
         s.currentPrice = q.regularMarketPrice;
-        // Yahoo also provides trailingAnnualDividendRate
-        if (q.trailingAnnualDividendRate && q.trailingAnnualDividendRate > 0) {
-          s.divPerShare = q.trailingAnnualDividendRate;
-        }
+        if (q.trailingAnnualDividendRate > 0) s.divPerShare = q.trailingAnnualDividendRate;
         updated++;
       }
     });
     savePortfolio();
     renderAll();
-    showToast(`Updated prices for ${updated} stock${updated !== 1 ? 's' : ''}`);
+    showToast(`Updated ${updated} stock${updated !== 1 ? 's' : ''}`);
   } catch(e) {
     showToast('Price refresh failed — check your connection');
     console.warn('Price refresh error:', e);
