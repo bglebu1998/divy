@@ -1,0 +1,198 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>Divy — Dividend Portfolio Dashboard</title>
+  <link rel="preconnect" href="https://fonts.googleapis.com">
+  <link href="https://fonts.googleapis.com/css2?family=DM+Mono:wght@400;500&family=Instrument+Serif:ital@0;1&family=DM+Sans:wght@300;400;500&display=swap" rel="stylesheet">
+  <link rel="stylesheet" href="style.css">
+</head>
+<body>
+
+  <header class="app-header">
+    <div class="header-inner">
+      <div class="logo">
+        <span class="logo-mark">$</span>
+        <span class="logo-text">Divy</span>
+        <span class="logo-sub">dividend tracker</span>
+      </div>
+      <div class="header-meta">
+        <span id="header-annual" class="header-stat"></span>
+        <button class="btn-refresh" id="refresh-prices-btn" onclick="refreshPrices()" title="Refresh prices via Yahoo Finance">
+          <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><polyline points="23 4 23 10 17 10"/><polyline points="1 20 1 14 7 14"/><path d="M3.51 9a9 9 0 0 1 14.85-3.36L23 10M1 14l4.64 4.36A9 9 0 0 0 20.49 15"/></svg>
+          Refresh prices
+        </button>
+        <span id="last-updated" class="last-updated"></span>
+      </div>
+    </div>
+  </header>
+
+  <main class="app-main">
+    <nav class="tab-nav">
+      <button class="tab active" data-tab="portfolio" onclick="showTab('portfolio', this)">Portfolio</button>
+      <button class="tab" data-tab="calendar" onclick="showTab('calendar', this)">Calendar</button>
+      <button class="tab" data-tab="income" onclick="showTab('income', this)">Income</button>
+      <button class="tab" data-tab="timer" onclick="showTab('timer', this)">Divy Timer</button>
+    </nav>
+
+    <!-- PORTFOLIO TAB -->
+    <div id="tab-portfolio" class="panel active">
+      <div class="metrics-row" id="port-metrics"></div>
+
+      <div class="card add-card">
+        <div class="card-header">
+          <h2>Add stock</h2>
+          <span class="card-hint">All fields except ticker and shares are optional</span>
+        </div>
+        <div class="add-form">
+          <div class="field-group">
+            <label>Ticker</label>
+            <input id="a-ticker" placeholder="AAPL" onkeydown="if(event.key==='Enter')addStock()" autocomplete="off" spellcheck="false">
+          </div>
+          <div class="field-group">
+            <label>Shares</label>
+            <input id="a-shares" type="number" placeholder="100" step="any" min="0">
+          </div>
+          <div class="field-group">
+            <label>Price paid ($)</label>
+            <input id="a-price" type="number" placeholder="0.00" step="any" min="0">
+          </div>
+          <div class="field-group">
+            <label>Current price ($)</label>
+            <input id="a-cprice" type="number" placeholder="0.00" step="any" min="0">
+          </div>
+          <div class="field-group">
+            <label>Ann. div/sh ($)</label>
+            <input id="a-div" type="number" placeholder="0.00" step="any" min="0">
+          </div>
+          <div class="field-group">
+            <label>Frequency</label>
+            <select id="a-freq">
+              <option value="monthly">Monthly</option>
+              <option value="quarterly" selected>Quarterly</option>
+              <option value="semiannual">Semiannual</option>
+              <option value="annual">Annual</option>
+            </select>
+          </div>
+          <div class="field-group">
+            <label>Ex-div day</label>
+            <input id="a-exday" type="number" placeholder="15" min="1" max="28">
+          </div>
+          <div class="field-group">
+            <label>Pay day</label>
+            <input id="a-payday" type="number" placeholder="25" min="1" max="31">
+          </div>
+          <div class="field-group field-group--btn">
+            <button class="btn btn-primary" onclick="addStock()">+ Add stock</button>
+          </div>
+        </div>
+        <div id="add-err" class="form-error"></div>
+      </div>
+
+      <div class="card">
+        <div class="card-header">
+          <h2>Holdings</h2>
+          <span class="yield-badge" id="port-yield"></span>
+        </div>
+        <div class="table-wrap">
+          <table class="holdings-table" id="holdings-tbl">
+            <thead>
+              <tr>
+                <th>Ticker</th>
+                <th>Name</th>
+                <th>Shares</th>
+                <th>Price paid</th>
+                <th>Current</th>
+                <th>Div/sh/yr</th>
+                <th>Frequency</th>
+                <th>Ex day</th>
+                <th>Pay day</th>
+                <th>Total/yr</th>
+                <th>Yield</th>
+                <th>G/L</th>
+                <th></th>
+              </tr>
+            </thead>
+            <tbody id="holdings-body"></tbody>
+          </table>
+        </div>
+        <div id="holdings-empty" class="empty-state">
+          <div class="empty-icon">$</div>
+          <p>No stocks yet. Add your first holding above.</p>
+        </div>
+      </div>
+    </div>
+
+    <!-- CALENDAR TAB -->
+    <div id="tab-calendar" class="panel">
+      <div class="card">
+        <div class="cal-controls">
+          <button class="btn btn-ghost" onclick="calMove(-1)">&#8592; Prev</button>
+          <h2 id="cal-title"></h2>
+          <button class="btn btn-ghost" onclick="calMove(1)">Next &#8594;</button>
+        </div>
+        <div class="cal-legend">
+          <span class="leg-item"><span class="leg-dot leg-pay"></span>Pay date</span>
+          <span class="leg-item"><span class="leg-dot leg-ex"></span>Ex-dividend date</span>
+        </div>
+        <div class="cal-grid-headers" id="cal-hds"></div>
+        <div class="cal-grid" id="cal-days"></div>
+      </div>
+    </div>
+
+    <!-- INCOME TAB -->
+    <div id="tab-income" class="panel">
+      <div class="metrics-row" id="inc-metrics"></div>
+
+      <div class="card">
+        <div class="card-header"><h2>Monthly income projection</h2></div>
+        <div class="monthly-chart" id="inc-chart"></div>
+        <div class="monthly-labels" id="inc-labels"></div>
+      </div>
+
+      <div class="card">
+        <div class="card-header"><h2>Upcoming payments — next 90 days</h2></div>
+        <div id="upcoming-list"></div>
+        <div id="upcoming-empty" class="empty-state" style="display:none">
+          <p>No payments scheduled in the next 90 days.</p>
+        </div>
+      </div>
+
+      <div class="card">
+        <div class="card-header"><h2>Income by holding</h2></div>
+        <div id="by-holding-chart"></div>
+      </div>
+    </div>
+
+    <!-- TIMER TAB -->
+    <div id="tab-timer" class="panel">
+      <div class="card timer-card">
+        <div class="timer-label" id="tlabel">Track time &amp; dividends accumulating in real time</div>
+        <div class="timer-clock" id="tclk">00:00:00</div>
+        <div class="timer-earned" id="tearn">$0.000000 earned this session</div>
+        <div class="timer-rate" id="trate"></div>
+        <div class="timer-actions">
+          <button class="btn btn-primary btn-large" id="tbtn" onclick="timerToggle()">Start</button>
+          <button class="btn btn-ghost btn-large" onclick="timerReset()">Reset</button>
+        </div>
+      </div>
+
+      <div class="card">
+        <div class="card-header"><h2>Next incoming dividends</h2></div>
+        <div id="next-divs-list"></div>
+      </div>
+    </div>
+  </main>
+
+  <footer class="app-footer">
+    <span>Divy — personal dividend tracker</span>
+    <span>Data stored locally in your browser</span>
+  </footer>
+
+  <!-- TOAST -->
+  <div id="toast" class="toast"></div>
+
+  <script src="app.js"></script>
+</body>
+</html>
