@@ -226,6 +226,14 @@ select {
   margin-top: 8px;
   display: none;
 }
+.fetch-source-badge {
+  font-size: 11px;
+  color: var(--text-faint);
+  background: var(--surface2);
+  padding: 3px 9px;
+  border-radius: 20px;
+  letter-spacing: 0.02em;
+}
 
 /* ── Buttons ── */
 .btn {
@@ -552,3 +560,4 @@ select {
   .metrics-row { grid-template-columns: 1fr 1fr; }
   .metric-value { font-size: 18px; }
 }
+
