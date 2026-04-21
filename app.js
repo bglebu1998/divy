@@ -89,66 +89,47 @@ async function fetchAndPreview() {
   btn.innerHTML = '<svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" style="animation:spin 0.7s linear infinite"><polyline points="23 4 23 10 17 10"/><polyline points="1 20 1 14 7 14"/><path d="M3.51 9a9 9 0 0 1 14.85-3.36L23 10M1 14l4.64 4.36A9 9 0 0 0 20.49 15"/></svg> Looking up...';
   document.getElementById('add-err').style.display = 'none';
 
-  let quote = null;
-  let fetchFailed = false;
+  let currentPrice = 0, divPerShare = 0, name = ticker, freq = 'quarterly';
+  let exDay = 15, payDay = 25, divYield = 0;
+  let fetchFailed = false, note = '';
 
   try {
-    quote = await fetchYahooQuote(ticker);
+    const data = await fetchFinnhubFull(ticker);
+    if (!data) throw new Error('No data returned');
+
+    currentPrice = data.currentPrice;
+    name = data.name;
+    divPerShare = data.annualDiv;
+    divYield = parseFloat(data.divYield);
+    freq = data.freq;
+    exDay = data.exDay;
+    payDay = data.payDay;
+
+    note = divPerShare > 0
+      ? `Yield: ${data.divYield}%  ·  $${divPerShare.toFixed(2)}/sh annually  ·  ${freq}`
+      : `No dividend history found — enter one manually if applicable.`;
+
   } catch(e) {
-    console.warn('All proxies failed:', e);
     fetchFailed = true;
-  }
-
-  // Build pending data — use fetched values if available, blanks if not
-  const divRate = quote?.trailingAnnualDividendRate || 0;
-  const divYield = quote?.trailingAnnualDividendYield || 0;
-  const name = quote?.longName || quote?.shortName || ticker;
-
-  let freq = 'quarterly';
-  if (quote && /monthly dividend/i.test(name)) freq = 'monthly';
-
-  let exDay = 15, payDay = 25;
-  if (quote?.exDividendDate) {
-    const ex = new Date(quote.exDividendDate * 1000);
-    exDay = ex.getDate();
-    payDay = Math.min(exDay + 10, 28);
+    note = 'Could not fetch data — fill in the fields manually below.';
+    console.warn('Finnhub fetch error:', e);
   }
 
   pendingAdd = {
-    ticker,
-    shares,
+    ticker, shares, name, freq, exDay, payDay,
     price: parseFloat(document.getElementById('a-price').value) || 0,
-    name,
-    currentPrice: quote?.regularMarketPrice || 0,
-    divPerShare: divRate,
-    freq,
-    divYield: (divYield * 100).toFixed(2),
-    exDay,
-    payDay,
+    currentPrice, divPerShare, divYield,
   };
 
-  // Populate preview fields
   document.getElementById('preview-name').textContent = name;
   document.getElementById('preview-ticker').textContent = ticker;
-  document.getElementById('p-cprice').value = pendingAdd.currentPrice ? pendingAdd.currentPrice.toFixed(2) : '';
-  document.getElementById('p-div').value = pendingAdd.divPerShare ? pendingAdd.divPerShare.toFixed(4) : '';
-  document.getElementById('p-freq').value = pendingAdd.freq;
-  document.getElementById('p-exday').value = pendingAdd.exDay;
-  document.getElementById('p-payday').value = pendingAdd.payDay;
-
-  // Status note
-  let note;
-  if (fetchFailed || !quote) {
-    note = 'Could not reach Yahoo Finance — please fill in the fields manually below.';
-    document.getElementById('preview-note').style.color = 'var(--amber)';
-  } else if (divRate > 0) {
-    note = `Yield: ${pendingAdd.divYield}%  ·  $${divRate.toFixed(2)}/sh annually  ·  Price: $${pendingAdd.currentPrice.toFixed(2)}`;
-    document.getElementById('preview-note').style.color = '';
-  } else {
-    note = `No dividend found for ${ticker} — enter one manually if applicable.`;
-    document.getElementById('preview-note').style.color = 'var(--amber)';
-  }
+  document.getElementById('p-cprice').value = currentPrice ? currentPrice.toFixed(2) : '';
+  document.getElementById('p-div').value = divPerShare ? divPerShare.toFixed(4) : '';
+  document.getElementById('p-freq').value = freq;
+  document.getElementById('p-exday').value = exDay;
+  document.getElementById('p-payday').value = payDay;
   document.getElementById('preview-note').textContent = note;
+  document.getElementById('preview-note').style.color = fetchFailed ? 'var(--amber)' : '';
   document.getElementById('add-preview').style.display = 'block';
 
   btn.disabled = false;
@@ -230,93 +211,91 @@ function cancelEdit() {
   renderHoldings();
 }
 
-// ── Yahoo Finance API ─────────────────────────────────
-// Multiple proxies tried in order; 8s timeout per attempt
+// ── Finnhub API ───────────────────────────────────────
 
-const PROXIES = [
-  url => `https://api.allorigins.win/get?url=${encodeURIComponent(url)}`,
-  url => `https://corsproxy.io/?${encodeURIComponent(url)}`,
-  url => `https://api.codetabs.com/v1/proxy?quest=${encodeURIComponent(url)}`,
-];
+const FINNHUB_KEY = 'd7junu1r01qnk4ocuts0d7junu1r01qnk4ocutsg';
+const FH_BASE = 'https://finnhub.io/api/v1';
 
-async function fetchWithTimeout(url, ms = 8000) {
-  const controller = new AbortController();
-  const id = setTimeout(() => controller.abort(), ms);
-  try {
-    const res = await fetch(url, { signal: controller.signal });
-    clearTimeout(id);
-    return res;
-  } catch(e) {
-    clearTimeout(id);
-    throw e;
-  }
+async function fhGet(path, params = {}) {
+  const p = new URLSearchParams({ ...params, token: FINNHUB_KEY });
+  const res = await fetch(`${FH_BASE}${path}?${p}`);
+  if (!res.ok) throw new Error(`Finnhub ${res.status}: ${path}`);
+  return res.json();
 }
 
-async function fetchYahooRaw(yahooUrl) {
-  for (const makeProxy of PROXIES) {
-    try {
-      const proxyUrl = makeProxy(yahooUrl);
-      const res = await fetchWithTimeout(proxyUrl, 8000);
-      if (!res.ok) continue;
-      const text = await res.text();
-      // allorigins wraps in {contents:...}, others return raw JSON
-      let json;
-      try {
-        const outer = JSON.parse(text);
-        json = typeof outer.contents === 'string' ? JSON.parse(outer.contents) : outer;
-      } catch {
-        json = JSON.parse(text);
-      }
-      return json;
-    } catch(e) {
-      console.warn('Proxy failed, trying next...', e.message);
-    }
-  }
-  return null;
+// Fetch everything needed to add a stock: quote + profile + dividend history
+async function fetchFinnhubFull(ticker) {
+  const to = new Date().toISOString().slice(0, 10);
+  const from = new Date(Date.now() - 2 * 365 * 86400000).toISOString().slice(0, 10);
+
+  const [quoteRes, profileRes, divRes] = await Promise.allSettled([
+    fhGet('/quote', { symbol: ticker }),
+    fhGet('/stock/profile2', { symbol: ticker }),
+    fhGet('/stock/dividend', { symbol: ticker, from, to }),
+  ]);
+
+  const quote   = quoteRes.status   === 'fulfilled' ? quoteRes.value   : null;
+  const profile = profileRes.status === 'fulfilled' ? profileRes.value : null;
+  const divs    = divRes.status     === 'fulfilled' ? (Array.isArray(divRes.value) ? divRes.value : []) : [];
+
+  if (!quote || !quote.c || quote.c === 0) return null;
+
+  // Sort dividends newest-first
+  divs.sort((a, b) => new Date(b.exDate || b.date) - new Date(a.exDate || a.date));
+  const latest = divs[0] || null;
+
+  // Infer frequency from how many dividends in the past 12 months
+  const oneYearAgo = Date.now() - 365 * 86400000;
+  const recent = divs.filter(d => new Date(d.exDate || d.date) > oneYearAgo);
+  let freq = 'quarterly';
+  if (recent.length >= 10) freq = 'monthly';
+  else if (recent.length <= 1) freq = 'annual';
+  else if (recent.length === 2) freq = 'semiannual';
+
+  const freqN = FREQ_N[freq] || 4;
+  const divAmount = latest?.amount || 0;
+  const annualDiv = divAmount * freqN;
+
+  let exDay = 15, payDay = 25;
+  if (latest?.exDate) exDay = new Date(latest.exDate).getDate();
+  if (latest?.payDate) payDay = new Date(latest.payDate).getDate();
+
+  const currentPrice = quote.c;
+
+  return {
+    name: profile?.name || ticker,
+    currentPrice,
+    annualDiv,
+    freq,
+    exDay,
+    payDay,
+    divYield: currentPrice > 0 ? (annualDiv / currentPrice * 100).toFixed(2) : '0.00',
+  };
 }
 
-async function fetchYahooQuote(ticker) {
-  const url = `https://query1.finance.yahoo.com/v7/finance/quote?symbols=${ticker}&fields=regularMarketPrice,trailingAnnualDividendRate,trailingAnnualDividendYield,longName,shortName,exDividendDate`;
-  const data = await fetchYahooRaw(url);
-  const quotes = data?.quoteResponse?.result || [];
-  return quotes[0] || null;
-}
-
-async function fetchYahooQuotes(tickers) {
-  const url = `https://query1.finance.yahoo.com/v7/finance/quote?symbols=${tickers.join(',')}&fields=regularMarketPrice,trailingAnnualDividendRate,trailingAnnualDividendYield,longName,shortName`;
-  const data = await fetchYahooRaw(url);
-  return data?.quoteResponse?.result || [];
-}
-
-// ── Price refresh (Yahoo Finance) ─────────────────────
+// ── Refresh all prices ────────────────────────────────
 
 async function refreshPrices() {
   if (portfolio.length === 0) { showToast('No stocks to refresh'); return; }
   const btn = document.getElementById('refresh-prices-btn');
+  const ICON_SPIN = '<svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" style="animation:spin 0.7s linear infinite"><polyline points="23 4 23 10 17 10"/><polyline points="1 20 1 14 7 14"/><path d="M3.51 9a9 9 0 0 1 14.85-3.36L23 10M1 14l4.64 4.36A9 9 0 0 0 20.49 15"/></svg>';
+  const ICON = '<svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><polyline points="23 4 23 10 17 10"/><polyline points="1 20 1 14 7 14"/><path d="M3.51 9a9 9 0 0 1 14.85-3.36L23 10M1 14l4.64 4.36A9 9 0 0 0 20.49 15"/></svg>';
   btn.disabled = true;
-  btn.innerHTML = '<svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" style="animation:spin 0.7s linear infinite"><polyline points="23 4 23 10 17 10"/><polyline points="1 20 1 14 7 14"/><path d="M3.51 9a9 9 0 0 1 14.85-3.36L23 10M1 14l4.64 4.36A9 9 0 0 0 20.49 15"/></svg> Refreshing...';
+  btn.innerHTML = ICON_SPIN + ' Refreshing...';
 
-  try {
-    const quotes = await fetchYahooQuotes(portfolio.map(s => s.ticker));
-    let updated = 0;
-    quotes.forEach(q => {
-      const s = portfolio.find(p => p.ticker === q.symbol);
-      if (s && q.regularMarketPrice) {
-        s.currentPrice = q.regularMarketPrice;
-        if (q.trailingAnnualDividendRate > 0) s.divPerShare = q.trailingAnnualDividendRate;
-        updated++;
-      }
-    });
-    savePortfolio();
-    renderAll();
-    showToast(`Updated ${updated} stock${updated !== 1 ? 's' : ''}`);
-  } catch(e) {
-    showToast('Price refresh failed — check your connection');
-    console.warn('Price refresh error:', e);
+  let updated = 0;
+  for (const s of portfolio) {
+    try {
+      const q = await fhGet('/quote', { symbol: s.ticker });
+      if (q.c && q.c > 0) { s.currentPrice = q.c; updated++; }
+      await new Promise(r => setTimeout(r, 200)); // respect 60 req/min free tier
+    } catch(e) { console.warn('Refresh failed for', s.ticker, e); }
   }
-
+  savePortfolio();
+  renderAll();
+  showToast(`Updated ${updated} stock${updated !== 1 ? 's' : ''}`);
   btn.disabled = false;
-  btn.innerHTML = '<svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><polyline points="23 4 23 10 17 10"/><polyline points="1 20 1 14 7 14"/><path d="M3.51 9a9 9 0 0 1 14.85-3.36L23 10M1 14l4.64 4.36A9 9 0 0 0 20.49 15"/></svg> Refresh prices';
+  btn.innerHTML = ICON + ' Refresh prices';
 }
 
 // ── Dividend date logic ───────────────────────────────
